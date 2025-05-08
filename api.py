@@ -43,7 +43,6 @@ def get_collection_names():
     """
     collections = chroma_client.list_collections()
     collection_names = [collection.name for collection in collections]
-    
     return collection_names
 
 # Function to split text into chunks
@@ -73,7 +72,6 @@ def get_ollama_embedding(text):
 
 
 
-print(get_collection_names())
 
 def generate_documents(topic, collection_name=None):
     """
@@ -166,6 +164,7 @@ def extract_topics_from_question(question, model="llama3"):
     Returns:
         list: Relevant topics to search for on Wikipedia
     """
+    print(f"generating topics from this query: {question}....")
     prompt = (
         "Extract 1-3 most relevant Wikipedia topic search terms from this question. "
         "Return ONLY the topics as a comma-separated list without explanations or additional text. "
@@ -193,6 +192,7 @@ def extract_topics_from_question(question, model="llama3"):
         topics_text = result["message"]["content"].strip()
         # Split the comma-separated topics and clean them up
         topics = [topic.strip() for topic in topics_text.split(",")]
+        print(f"created these topics: {topics}")
         return topics
     else:
         print(f"Error extracting topics: {response.status_code}")
@@ -200,4 +200,64 @@ def extract_topics_from_question(question, model="llama3"):
 
 
 
-print(extract_topics_from_question("who is the king of england?"))
+
+def find_relevant_collections(topics, collection_names):
+    """
+    Find collections relevant to the provided topics.
+    
+    Args:
+        topics: List of topic strings
+        collection_names: List of collection names to search in
+        
+    Returns:
+        List of relevant collection names, sorted by relevance
+    """
+    import string
+    import re
+    from collections import Counter
+    
+    # Common words to ignore
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'of', 'to', 'for', 'in', 'on', 'by'}
+    
+    # Track collection relevance scores
+    relevance_scores = Counter()
+    
+    # Process topics
+    for topic in topics:
+        # Clean and split the topic
+        translator = str.maketrans('', '', string.punctuation)
+        clean_topic = topic.translate(translator).lower()
+        topic_words = [word for word in clean_topic.split() if word not in stop_words]
+        
+        # Score each collection
+        for collection_name in collection_names:
+            collection_lower = collection_name.lower()
+            
+            # Individual word matches
+            for word in topic_words:
+                # Make sure we're matching whole words, not substrings
+                if re.search(rf'\b{word}\b', collection_lower):
+                    # Add higher score for exact topic matches
+                    relevance_scores[collection_name] += 2
+                elif word in collection_lower:
+                    relevance_scores[collection_name] += 1
+            
+            # Full topic match bonus
+            if topic.lower() in collection_lower:
+                relevance_scores[collection_name] += 5
+                
+    # Get collections with scores > 0, sorted by score
+    relevant_collections = [name for name, score in 
+                           sorted(relevance_scores.items(), 
+                                 key=lambda x: x[1], reverse=True) 
+                           if score > 0]
+    
+    return relevant_collections
+
+# Example usage
+collection_names = get_collection_names()
+topics = extract_topics_from_question('what is fake news?')
+print(f"Topics: {topics}")
+
+relevant_collections = find_relevant_collections(topics, collection_names)
+print(f"Relevant collections: {relevant_collections}")
