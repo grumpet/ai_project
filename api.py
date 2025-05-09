@@ -201,63 +201,214 @@ def extract_topics_from_question(question, model="llama3"):
 
 
 
-def find_relevant_collections(topics, collection_names):
+def check_query_relevance(query, topics, threshold=0.65):
     """
-    Find collections relevant to the provided topics.
+    Check if a query is relevant to any of the given topics
+    using embedding similarity.
     
     Args:
-        topics: List of topic strings
-        collection_names: List of collection names to search in
-        
+        query: User's question
+        topics: List of potential topics
+        threshold: Minimum similarity score to consider relevant
+    
     Returns:
-        List of relevant collection names, sorted by relevance
+        tuple: (is_relevant, most_relevant_topic, score)
     """
-    import string
-    import re
-    from collections import Counter
+    # Get embedding for the query
+    query_embedding = get_ollama_embedding(query)
     
-    # Common words to ignore
-    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'of', 'to', 'for', 'in', 'on', 'by'}
-    
-    # Track collection relevance scores
-    relevance_scores = Counter()
-    
-    # Process topics
+    # Get embeddings for all topics
+    topic_embeddings = []
     for topic in topics:
-        # Clean and split the topic
-        translator = str.maketrans('', '', string.punctuation)
-        clean_topic = topic.translate(translator).lower()
-        topic_words = [word for word in clean_topic.split() if word not in stop_words]
-        
-        # Score each collection
-        for collection_name in collection_names:
-            collection_lower = collection_name.lower()
-            
-            # Individual word matches
-            for word in topic_words:
-                # Make sure we're matching whole words, not substrings
-                if re.search(rf'\b{word}\b', collection_lower):
-                    # Add higher score for exact topic matches
-                    relevance_scores[collection_name] += 2
-                elif word in collection_lower:
-                    relevance_scores[collection_name] += 1
-            
-            # Full topic match bonus
-            if topic.lower() in collection_lower:
-                relevance_scores[collection_name] += 5
-                
-    # Get collections with scores > 0, sorted by score
-    relevant_collections = [name for name, score in 
-                           sorted(relevance_scores.items(), 
-                                 key=lambda x: x[1], reverse=True) 
-                           if score > 0]
+        topic_emb = get_ollama_embedding(topic)
+        topic_embeddings.append(topic_emb)
     
-    return relevant_collections
+    # Calculate cosine similarity
+    max_similarity = 0
+    most_relevant_topic = None
+    
+    for i, topic_emb in enumerate(topic_embeddings):
+        # Calculate cosine similarity
+        similarity = cosine_similarity_vectors(query_embedding, topic_emb)
+        
+        if similarity > max_similarity:
+            max_similarity = similarity
+            most_relevant_topic = topics[i]
+    
+    is_relevant = max_similarity >= threshold
+    
+    return (is_relevant, most_relevant_topic, max_similarity)
 
-# Example usage
+def cosine_similarity_vectors(v1, v2):
+    """Calculate cosine similarity between two vectors"""
+    import numpy as np
+    v1 = np.array(v1)
+    v2 = np.array(v2)
+    return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+
+def query_documents(question, topics, n_results=5):
+    """
+    Query documents across multiple collections based on topics.
+    
+    Args:
+        question: The query question
+        topics: List of topics to search collections for
+        n_results: Number of results to retrieve per collection
+    """
+    all_results = []
+    query_embedding = get_ollama_embedding(question)
+    
+    # Get all collections
+    all_collection_names = get_collection_names()
+    
+    # Process each topic
+    for topic in topics:
+        # Format collection name to match generate_documents naming convention
+        collection_name = f"wiki_{topic.replace(' ', '_').lower()}_collection"
+        
+        if collection_name not in all_collection_names:
+            print(f"Warning: Collection for topic '{topic}' does not exist")
+            continue
+        
+        # Get the collection object
+        collection = chroma_client.get_collection(
+            name=collection_name, 
+            embedding_function=ollama_ef
+        )
+        
+        # Query the collection
+        results = collection.query(
+            query_embeddings=[query_embedding], 
+            n_results=n_results,
+            include=["documents", "metadatas", "distances"]
+        )
+        
+        # Process results
+        documents = results["documents"][0]
+        metadatas = results["metadatas"][0]
+        distances = results["distances"][0]
+        
+        for i in range(len(documents)):
+            all_results.append({
+                "text": documents[i],
+                "metadata": metadatas[i],
+                "distance": distances[i],
+                "source": topic  # Use topic as source identifier
+            })
+    
+    # Sort by relevance
+    all_results.sort(key=lambda x: x["distance"])
+    
+    # Return the most relevant chunks
+    return [result["text"] for result in all_results[:n_results]]
+
+
+
+# Function to generate a response from Ollama
+def generate_response(question, relevant_chunks):
+    print("generating response...\n\n\n")
+    print("using the following chunks...\n")
+    for chunk in relevant_chunks:
+        print(f"\n\n{chunk}\n\n")
+    context = "\n\n".join(relevant_chunks)
+    prompt = (
+        "You are an assistant for question-answering tasks. Use the following pieces of "
+        "retrieved context to answer the question. If you don't know the answer, say that you "
+        "don't know. Use three sentences maximum and keep the answer concise."
+        "\n\nContext:\n" + context + "\n\nQuestion:\n" + question
+    )
+
+    # Make a request to Ollama's API
+    response = requests.post(
+        "http://localhost:11434/api/chat",
+        json={
+            "model": "llama3", # You can change this to any model you have in Ollama
+            "messages": [
+                {
+                    "role": "system",
+                    "content": prompt
+                },
+                {
+                    "role": "user", 
+                    "content": question
+                }
+            ],
+            "stream": False
+        }
+    )
+
+    if response.status_code == 200:
+        result = response.json()
+        return result["message"]["content"]
+    else:
+        return f"Error: {response.status_code} - {response.text}"
+    
+    
+query = 'who is the president of the united states?' 
+topics = extract_topics_from_question(query)
+is_relevant_topic, most_relevant_topic, similarity_score = check_query_relevance(query, topics)
+print(f"Is query relevant: {is_relevant_topic}")
+print(f"Most relevant topic: {most_relevant_topic}")
+print(f"Similarity score: {similarity_score:.4f}")
 collection_names = get_collection_names()
-topics = extract_topics_from_question('what is fake news?')
-print(f"Topics: {topics}")
+print(f"Check if there are simmilar collections from the exsiting collections: {collection_names}")
 
-relevant_collections = find_relevant_collections(topics, collection_names)
-print(f"Relevant collections: {relevant_collections}")
+
+
+collection_fixed_names = [name.replace("wiki_", "").replace("_collection", "").replace("_", " ") for name in collection_names]
+print(f"Check if there are simmilar collections from the exsiting collections: {collection_fixed_names}")
+relevent_collection_names = []
+is_relevant_collection, most_relevent_collection, similarity_score = check_query_relevance(query, relevent_collection_names)
+print(f"is collection relevent {is_relevant_collection}")
+print(f"most relevent collection {most_relevent_collection}")
+print(f"simalarity score {similarity_score}")
+
+
+# Replace your current code with this:
+relevant_chunks = []
+
+# Determine if we should use existing collections or create new ones
+if most_relevant_topic.lower() in collection_fixed_names:
+    # Topic exists in collections, query it directly
+    collection_name = f"wiki_{most_relevant_topic.replace(' ', '_').lower()}_collection"
+    print(f"Using existing collection: {collection_name}")
+    
+    # Get the collection
+    collection = chroma_client.get_collection(name=collection_name, embedding_function=ollama_ef)
+    
+    # Query the collection
+    results = collection.query(
+        query_embeddings=[get_ollama_embedding(query)],
+        n_results=5,
+        include=["documents", "metadatas"]
+    )
+    
+    # Add retrieved chunks to relevant_chunks
+    relevant_chunks.extend(results["documents"][0])
+else:
+    # Need to create new collection
+    print(f"Creating new collection for topic: {most_relevant_topic}")
+    _, _ = generate_documents(most_relevant_topic)
+    
+    # Now query the newly created collection
+    collection_name = f"wiki_{most_relevant_topic.replace(' ', '_').lower()}_collection"
+    collection = chroma_client.get_collection(name=collection_name, embedding_function=ollama_ef)
+    
+    # Query the collection
+    results = collection.query(
+        query_embeddings=[get_ollama_embedding(query)],
+        n_results=5,
+        include=["documents", "metadatas"]
+    )
+    
+    # Add retrieved chunks to relevant_chunks
+    relevant_chunks.extend(results["documents"][0])
+
+print("Relevant chunks retrieved:", len(relevant_chunks))
+answer = generate_response(query, relevant_chunks)
+print("\nAnswer:")
+print(answer)
+
+
+
+    
