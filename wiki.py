@@ -342,11 +342,11 @@ def generate_response_with_sources(question, relevant_chunks, chunk_sources):
     else:
         return f"Error: {response.status_code} - {response.text}"
 
-query = 'Who is the president of India?' 
+query = 'hoe does tee work ?' 
 topics = extract_topics_from_question(query)
 collection_names = get_collection_names()
 print(f"Check if there are simmilar collections from the exsiting collections:\n {collection_names}\n")
-
+    
 
 
 collection_fixed_names = [name.replace("wiki_", "").replace("_collection", "").replace("_", " ") for name in collection_names]
